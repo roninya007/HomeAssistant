@@ -8,38 +8,37 @@ MyBYD app) through Home Assistant. Kept for reuse on similar integrations later.
 - Home Assistant **Core** (not HAOS/Supervised) running on an old Samsung S20 FE 5G,
   via Termux (F-Droid build) → `proot-distro` Debian container, no root.
 - HA config dir: `/root/homeassistant` (inside the Debian proot).
-- HA venv: `/root/ha-venv`.
+- HA venv: `/root/ha-venv-314` (Python 3.14, uv-managed). HA 2026.3+ requires
+  Python >= 3.14.2; the original `/root/ha-venv` (Debian's Python 3.13, stuck on HA
+  2026.2.3) is kept only for rollback.
 - Phone LAN IP: `192.168.7.22`, HA on port `8123`.
 - SSH into the phone: `ssh -p 8022 u0_a311@192.168.7.22` (Termux sshd, manually started
   by the user when needed — never added to boot scripts).
-- HA is autostarted on phone boot via `~/.termux/boot/start-homeassistant.sh`:
-  ```bash
-  #!/data/data/com.termux/files/usr/bin/bash
-  termux-wake-lock
-  exec proot-distro login debian -- bash -c 'export UV_LINK_MODE=copy && source /root/ha-venv/bin/activate && exec hass --config /root/homeassistant'
-  ```
+- On boot, `~/.termux/boot/start-homeassistant.sh` takes a wake lock and `exec`s
+  `~/hass-watchdog.sh`, which starts and supervises both Mosquitto and HA (venv path is
+  the `HA_VENV` variable at the top of the script).
   The `exec` chaining matters: proot has a `--kill-on-exit` behavior, so if you background
   a process (`&`/`nohup`) *inside* a `proot-distro login` shell and that shell exits, the
-  background job dies too. Using `exec` all the way through means there's no wrapper shell
-  left to exit — the top-level tracked process just *becomes* `hass`.
+  background job dies too. Launch detached from the Termux side instead
+  (`nohup proot-distro login debian -- ... &`), and `exec` all the way through.
 
 ## Manually restarting Home Assistant over SSH
 
-Needed after installing HACS and after installing the BYD integration. Two steps:
+Needed after installing or updating a custom integration. Easiest: Settings → System →
+⋮ → Restart Home Assistant in the UI. Over SSH, just stop HA and let the watchdog
+start it again within about a minute:
 
 ```bash
-# 1. Stop it
-ssh -p 8022 u0_a311@192.168.7.22 "pkill -f 'ha-venv/bin/hass'"
-# (the ssh command itself will often exit with code 255 here — that's just the
-# connection dying along with the process it was attached to, not a failure)
+# Stop it by PID. Don't put the process pattern itself in the ssh command text:
+# `pkill -f` would also match (and kill) the ssh session running it.
+ssh -p 8022 u0_a311@192.168.7.22 'kill $(ps -eo pid,args | awk "/venv-314.bin.hass/ && !/awk/ {print \$1}")'
 
-# 2. Relaunch it detached, same exec chain as the boot script, so it survives
-#    after this SSH session ends
-ssh -p 8022 u0_a311@192.168.7.22 "nohup proot-distro login debian -- bash -c 'export UV_LINK_MODE=copy && source /root/ha-venv/bin/activate && exec hass --config /root/homeassistant' > /data/data/com.termux/files/home/ha_restart.log 2>&1 < /dev/null & disown; sleep 1; echo LAUNCHED"
-
-# 3. Poll until it's back
+# Poll until it's back
 curl -s -o /dev/null -w "%{http_code}" http://192.168.7.22:8123/
 ```
+
+Don't let two HA instances run on the same config at once. When starting HA by hand,
+stop the watchdog first.
 
 ## Installing HACS on HA Core (no Supervisor)
 
